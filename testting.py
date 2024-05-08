@@ -4,6 +4,7 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 from flask_cors import CORS
+import logging
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for the entire app
@@ -25,7 +26,7 @@ def create_connection():
 @app.route('/perform_search', methods=['GET'])
 def search_results():
     connection = create_connection()
-    to_search = request.form.get('search_input')
+    to_search = request.args.get('search_input')
     try:
         with connection.cursor() as cursor:
             cursor.execute(f"""SELECT * FROM search WHERE search.state !='Deleted' AND search.query 
@@ -39,23 +40,22 @@ def search_results():
         connection.close()
 
 
-@app.route('/single_remove_search', methods=['POST'])
+@app.route('/remove_search', methods=['POST'])
 def remove_searched_entry():
     connection = create_connection()
-    to_remove = request.form.get('single_remove_search')
+    search_id = request.json.get('id')  # Get the id from the request body
     connection.autocommit(True)
     try:
         with connection.cursor() as cursor:
-            cursor.execute(f"""SET @search_id:=(SELECT search.id FROM search WHERE search.query={to_remove} 
-            AND search.state!='Deleted')""")
-            cursor.execute("UPDATE search SET search.state = 'Deleted' WHERE search.id=@search_id")
+            cursor.execute(f"""UPDATE search SET state = 'Deleted' 
+                            WHERE id = %s""", (search_id,))
             total_row_count = cursor.rowcount
             if total_row_count > 0:
-                return jsonify({'task': 'successful'})
+                return jsonify({'success': True, 'message': 'Search removed successfully'})
             else:
-                return jsonify({'task': 'nothing to update'})
+                return jsonify({'success': False, 'message': 'Nothing to remove'})
     except Exception as e:
-        return jsonify({'error': str(e)})
+        return jsonify({'success': False, 'error': str(e)})
     finally:
         connection.close()
 
@@ -84,21 +84,28 @@ def remove_multiple_searched_entry():
 @app.route('/insert_single_row', methods=['POST'])
 def insert_single_entry():
     connection = create_connection()
-    row_insert_question = request.form.get('single_row_insert_question').lower()
-    row_insert_result = request.form.get('single_row_insert_result').lower()
+    data = request.get_json()
+    row_insert_question = data.get('single_row_insert_question', '')
+    row_insert_result = data.get('single_row_insert_result', '')
     connection.autocommit(True)
+
     try:
         with connection.cursor() as cursor:
-            cursor.execute(f"""INSERT INTO search (query, result, state) 
-            VALUES ({row_insert_question}, {row_insert_result}, 'Added');""")
-            cursor.execute(f"""INSERT INTO search_history_new (query, result, state) 
-            VALUES ({row_insert_question}, {row_insert_result}, 'Added');""")
-            total_row_count = cursor.rowcount
-            if total_row_count == 2:
+            insert_search_query = "INSERT INTO search (query, result, state) VALUES (%s, %s, 'Added')"
+            insert_search_history_query = "INSERT INTO search_history_new (query, results, state) VALUES (%s, %s, 'Added')"
+            cursor.execute(insert_search_query, (row_insert_question, row_insert_result))
+            search_inserted = cursor.rowcount == 1
+
+            logging.info(f"Executing query: {insert_search_history_query}")
+            cursor.execute(insert_search_history_query, (row_insert_question, row_insert_result))
+            search_history_inserted = cursor.rowcount == 1
+
+            if search_inserted and search_history_inserted:
                 return jsonify({'task': 'successful'})
             else:
                 return jsonify({'task': 'failed'})
     except Exception as e:
+        logging.error(f"Error during insert: {str(e)}")
         return jsonify({'error': str(e)})
     finally:
         connection.close()
@@ -117,7 +124,7 @@ def update_single_row():
             id_fetched = cursor.fetchone()
             cursor.execute(f"""UPDATE search SET search.result = {new_value}, search.state = 'Updated' 
             WHERE search.id={id_fetched}""")
-            cursor.execute(f"""INSERT INTO search_history_new (query, result, state) 
+            cursor.execute(f"""INSERT INTO search_history_new (query, results, state) 
             VALUES ({question}, {new_value}, 'Added');""")
             total_row_count = cursor.rowcount
             if total_row_count == 2:
