@@ -114,28 +114,55 @@ def insert_single_entry():
 @app.route('/edit_single_row', methods=['POST'])
 def update_single_row():
     connection = create_connection()
-    question = request.form.get('selected_question')
-    new_value = request.form.get('selected_result')
+    old_query = request.form.get('old_query')
+    new_query = request.form.get('new_query')
+    result_to_update = request.form.get('result_to_update')
+    new_result = request.form.get('new_result')
+
     connection.autocommit(True)
     try:
         with connection.cursor() as cursor:
-            cursor.execute(f"""SET @search_id:=(SELECT search.id FROM search WHERE search.query={question} AND 
-            search.state!='Deleted')""")
-            id_fetched = cursor.fetchone()
-            cursor.execute(f"""UPDATE search SET search.result = {new_value}, search.state = 'Updated' 
-            WHERE search.id={id_fetched}""")
-            cursor.execute(f"""INSERT INTO search_history_new (query, results, state) 
-            VALUES ({question}, {new_value}, 'Added');""")
-            total_row_count = cursor.rowcount
-            if total_row_count == 2:
-                return jsonify({'task': 'successful'})
+            cursor.execute("""
+                SELECT @search_id:=id
+                FROM search
+                WHERE (TRIM(LOWER(query)) = LOWER(%s) OR TRIM(LOWER(result)) = LOWER(%s)) AND state != 'Deleted'
+                LIMIT 1;
+            """, (old_query.strip(), result_to_update.strip()))
+            search_result = cursor.fetchone()
+            if search_result:
+                search_id = search_result[0]
+                if search_id:
+                    # Update the search table
+                    update_query = """
+                        UPDATE search SET query=%s, result=%s, state='Updated' WHERE id=%s;
+                    """
+                    cursor.execute(update_query, (new_query, new_result, search_id))
+
+                    # Check if the update was successful
+                    if cursor.rowcount == 1:
+                        # Insert into search_history_new table
+                        insert_query = """
+                            INSERT INTO search_history_new (query, results, state) VALUES (%s, %s, %s);
+                        """
+                        cursor.execute(insert_query, (new_query, new_result, 'Added'))
+
+                        # Check if the insert was successful
+                        if cursor.rowcount == 1:
+                            return jsonify({'task': 'successful'})
+                        else:
+                            return jsonify({'task': 'failed', 'error': 'Failed to insert into search_history_new'})
+                    else:
+                        return jsonify({'task': 'failed', 'error': 'Failed to update search'})
+                else:
+                    return jsonify({'task': 'failed', 'error': 'Query not found'})
             else:
-                return jsonify({'task': 'failed'})
+                return jsonify({'task': 'failed', 'error': 'No matching row found'})
+
     except Exception as e:
+        print("Error:", str(e))
         return jsonify({'error': str(e)})
     finally:
         connection.close()
-
 
 if __name__ == '__main__':
     app.run(debug=True)
